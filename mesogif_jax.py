@@ -36,6 +36,7 @@ class StaticParams:
 class State:
     current_prop: Union[int, jnp.ndarray]
     current_voltage_prop: Union[int, jnp.ndarray]
+    voltage_prop: Union[int, jnp.ndarray]
     m:          Union[int, jnp.ndarray]
     h:          Union[int, jnp.ndarray]
     x:          Union[int, jnp.ndarray]
@@ -46,43 +47,6 @@ class State:
     lambd_old:      Union[int, jnp.ndarray] = jnp.zeros((M, K), dtype=jnp.float32)
     y:      Union[int, jnp.ndarray]         = jnp.zeros((M, 2, 2), dtype=jnp.float32)
 
-# def compute_current_propagators(params, staticparams):
-#     args = {'tau_s': params.tau_s, 'dt': staticparams.dt}
-#     def compute(args):
-#         Ad = args['dt'] * jnp.array([[-1/args['tau_s'], 0.],
-#                                      [1., -1/args['tau_s']]], dtype=jnp.float32)
-#
-#         exp_Ad = jax.scipy.linalg.expm(Ad)
-#         return exp_Ad
-#
-#
-#     in_axes = {'tau_s': 0, 'dt': None}
-#     # vectorize over synaptic ports
-#     compute_vec = jax.vmap(compute, in_axes=(in_axes,))
-#
-#     #vectorize over populations
-#     compute_vec = jax.vmap(compute_vec, in_axes=(in_axes,))
-#     return compute_vec(args)
-
-#
-# def compute_current_propagators(params, staticparams):
-#     args = {'tau_s': params.tau_s, 'dt': staticparams.dt}
-#     def compute(args):
-#         Ad = args['dt'] * jnp.array([[-1/args['tau_s'], 0.],
-#                                      [1., -1/args['tau_s']]], dtype=jnp.float32)
-#
-#         exp_Ad = jax.scipy.linalg.expm(Ad)
-#         return exp_Ad
-#
-#
-#     in_axes = {'tau_s': 0, 'dt': None}
-#     # vectorize over synaptic ports
-#     compute_vec = jax.vmap(compute, in_axes=(in_axes,))
-#
-#     #vectorize over populations
-#     compute_vec = jax.vmap(compute_vec, in_axes=(in_axes,))
-#     return compute_vec(args)
-
 def compute_current_propagators(tau_s, staticparams):
     t1 = jnp.exp(-staticparams.dt / tau_s)
     t2 = staticparams.dt * t1
@@ -91,25 +55,6 @@ def compute_current_propagators(tau_s, staticparams):
 
 compute_current_propagators = jax.vmap(compute_current_propagators, in_axes=(0, None)) # over synaptic ports
 compute_current_propagators = jax.vmap(compute_current_propagators, in_axes=(0, None)) # over populations
-
-# def compute_voltage_propagators(params, staticparams):
-#     args = {'tau_s': params.tau_s, 'tau_m': params.tau_m, 'C_mem': params.C_mem, 'dt': staticparams.dt}
-#
-#     def compute(args):
-#         denom = (1/args['tau_s'] - 1/args['tau_m'])
-#         t00 = jnp.exp(-args['dt'] / args['tau_s'])
-#         t10 = args['dt'] * jnp.exp(-args['dt'] / args['tau_s'])
-#
-#         t3 = jnp.exp(-args['dt'] / args['tau_m'])
-#         t0 = ((t3 - t00) / denom**2 - (t10 / denom)) / args['C_mem']
-#         t1 = (t3 - t00) / (args['C_mem'] * denom)
-#         t2 = 1-jnp.exp(-args['dt'] / args['tau_m'])
-#         return jnp.stack([t0, t1, t2, t3])
-#
-#     # vectorize over populations
-#     in_axes = {'tau_s': 0, 'tau_m': 0, 'dt': None, 'C_mem': 0}
-#     compute_vec = jax.vmap(compute, in_axes=(in_axes,))
-#     return compute_vec(args)
 
 def compute_current_voltage_propagators(tau_s, tau_m, C_mem, staticparams):
     t00 = jnp.exp(-staticparams.dt / tau_s)
@@ -123,7 +68,7 @@ def compute_current_voltage_propagators(tau_s, tau_m, C_mem, staticparams):
 def compute_voltage_propagators(tau_m, staticparams):
     t0 = jnp.exp(-staticparams.dt / tau_m)
     t1 = 1 - t0
-    return jnp.stack((t0, t1))
+    return jnp.stack((t0, t1), axis=-1)
 
 # vmap over synaptic ports
 compute_current_voltage_propagators \
@@ -132,17 +77,6 @@ compute_current_voltage_propagators \
 # vmap over populations
 compute_current_voltage_propagators \
     = jax.vmap(compute_current_voltage_propagators, in_axes=(0, 0, 0, None))
-
-
-# def update_u(y, u, RI, voltage_prop):
-#     voltage_state = jnp.concatenate((y, jnp.stack((RI, u))))
-#     u = voltage_prop.dot(voltage_state)
-#     return u
-#
-# vupdate_u = jax.vmap(update_u, in_axes=(None, 0, None, None))
-
-def current_u_contrib(y, voltage_prop):
-    return y.dot(voltage_prop)
 
 def roll_buffers(u, lambd_tilde, v, m):
     u = jnp.roll(u, 1)
@@ -156,12 +90,24 @@ def exponential_escape(x, c, delta):
 
 vexponential_escape = jax.vmap(exponential_escape, in_axes=(0, None, None))
 
-def update_current_voltage(current_voltage_prop, y):
+def compute_current_contrib(current_voltage_prop, y):
     return current_voltage_prop.dot(y)
 
-vupdate_current_voltage = jax.vmap(update_current_voltage)
+vcompute_current_contrib = jax.vmap(compute_current_contrib)
 
-def update_voltage(current_voltage_prop, y, RI_e)
+def compute_passive_contrib(voltage_prop, u, RI_e):
+    vec = jnp.stack((u, RI_e))
+    return voltage_prop.dot(vec)
+
+def update_u(current_voltage_prop, voltage_prop, y, u, RI_e):
+    # gives contribution from 2 synaptic ports, therefore sum()
+    current_contrib = vcompute_current_contrib(current_voltage_prop, y).sum()
+
+    # gives updated membrane potential after depolarization and constant current input
+    passive_contrib = compute_passive_contrib(voltage_prop, u, RI_e)
+    return current_contrib + passive_contrib
+
+vupdate_u = jax.vmap(update_u, in_axes=(None, None, None, 0, None))
 
 def update_synapses(current_prop, y):
     y1 = current_prop[0] * y[0]
@@ -182,7 +128,12 @@ def update_state(state: State, params: Params, spikes: jnp.float32, staticparams
     X = state.m.sum()
 
     # free neurons
-    h = update_u(y, state.h, params.RI, state.voltage_prop)
+    h = update_u(state.current_voltage_prop,
+                  state.voltage_prop,
+                  y,
+                  state.h,
+                  params.RI)
+
     lambd_tilde_free = exponential_escape(h - params.u_thr, params.c, params.delta_u)
     P_free = 1 - jnp.exp(-0.5 * (lambd_tilde_free + state.lambd_free) * staticparams.dt)
 
@@ -194,10 +145,11 @@ def update_state(state: State, params: Params, spikes: jnp.float32, staticparams
     lambd_old = state.lambd_old[staticparams.num_ref:]
 
     # update membrane potentials
-    u = vupdate_u(y,
+    u = vupdate_u(state.current_voltage_prop,
+                  state.voltage_prop,
+                  y,
                   u,
-                  params.RI,
-                  state.voltage_prop)
+                  params.RI)
 
     # compute escape rate
     lambd_tilde = vexponential_escape(u - params.u_thr, params.c, params.delta_u)
@@ -249,6 +201,7 @@ def update_state(state: State, params: Params, spikes: jnp.float32, staticparams
                   m = m,
                   voltage_prop = state.voltage_prop,
                   current_prop = state.current_prop,
+                  current_voltage_prop = state.current_voltage_prop,
                   lambd_old = lambd_old,
                   lambd_free = lambd_tilde_free,
                   h = h,
@@ -293,6 +246,7 @@ spikes = np.zeros((steps, M))
 spikes[80,:] = 50
 current_propagators = compute_current_propagators(params.tau_s, staticparams)
 current_voltage_propagators = compute_current_voltage_propagators(params.tau_s, params.tau_m, params.C_mem, staticparams)
+voltage_prop = compute_voltage_propagators(params.tau_m, staticparams)
 
 m_init = np.zeros((M, K), dtype=np.float32)
 m_init[:,0] = np.ones(M, dtype=np.float32) * 1000
@@ -304,6 +258,7 @@ state = State(y = jnp.zeros((M, 2, 2), dtype=jnp.float32),
               v = jnp.zeros((M, K), dtype=jnp.float32),
               current_prop = current_propagators,
               current_voltage_prop = current_voltage_propagators,
+              voltage_prop = voltage_prop,
               m = m_init,
               lambd_old = jnp.zeros((M, K), dtype=jnp.float32),
               h = jnp.zeros((M), dtype=jnp.float32),
@@ -311,20 +266,21 @@ state = State(y = jnp.zeros((M, 2, 2), dtype=jnp.float32),
               z = jnp.zeros((M), dtype=jnp.float32),
               lambd_free = jnp.zeros((M), dtype=jnp.float32),
               )
-#
-# # carry, log_probs = jax.jit(integrate)(state, params, spikes)
-#
-# states = [state]
-# ps = []
-# for i in range(steps):
-#     print(i, end='\r')
-#     s, p = update_state_jit(states[-1], params, spikes[i])
-#     ps.append(p.to_py())
-#     states.append(s)
-#
-# ps = np.array(ps)
-# us = np.array([s.u.to_py() for s in states])
-#
-# example_u = np.array([us[i,0,i%K] for i in range(0,1100)])
+
+# carry, log_probs = jax.jit(integrate)(state, params, spikes)
+
+states = [state]
+ps = []
+for i in range(steps):
+    print(i, end='\r')
+    s, p = update_state_jit(states[-1], params, spikes[i])
+    ps.append(p.to_py())
+    states.append(s)
+
+ps = np.array(ps)
+us = np.array([s.u.to_py() for s in states])
+
+example_u = np.array([us[i,0,i%K] for i in range(0,2000)])
+h = np.array([s.h[0] for s in states])
 # plt.plot(example_u)
 # plt.show()
