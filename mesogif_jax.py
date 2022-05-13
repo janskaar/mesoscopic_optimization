@@ -8,23 +8,22 @@ import chex
 
 import matplotlib.pyplot as plt
 
-M = 5
-K = 1000
 @chex.dataclass
 class Params:
     # J:        jnp.ndarray = jnp.array([1.]*K, dtype=jnp.float32)
     N:        jnp.ndarray
-    tau_m:    jnp.ndarray = jnp.ones(M, dtype=jnp.float32) * 20.
-    tau_s:    jnp.ndarray = jnp.ones((M, 2), dtype=jnp.float32) * 5.
+    tau_m:    jnp.ndarray
+    tau_s:    jnp.ndarray
     # u_reset:  jnp.ndarray = jnp.array([0.]*K, dtype=jnp.float32)
-    u_thr:    jnp.ndarray = jnp.ones(M, dtype=jnp.float32) * 20.
-    c:        jnp.ndarray = jnp.zeros(M, dtype=jnp.float32)
-    delta_u:  jnp.ndarray = jnp.ones(M, dtype=jnp.float32) * 2.
+    u_thr:    jnp.ndarray
+    c:        jnp.ndarray
+    delta_u:  jnp.ndarray
     # k:        jnp.ndarray = jnp.array([5.]*K, dtype=jnp.float32)
     # k_asc:    jnp.ndarray = jnp.array([5.]*K, dtype=jnp.float32)
     # f_asc:    jnp.ndarray = jnp.array([5.]*K, dtype=jnp.float32)
-    C_mem:    jnp.ones = jnp.ones(M, dtype=jnp.float32) * 20.
-    RI:       jnp.ones = jnp.ones(M, dtype=jnp.float32) * 20.
+    C_mem:    jnp.ndarray
+    RI:       jnp.ndarray
+    w:        jnp.ndarray
 
 @chex.dataclass(frozen=True)
 class StaticParams:
@@ -34,18 +33,19 @@ class StaticParams:
 
 @chex.dataclass
 class State:
-    current_prop: Union[int, jnp.ndarray]
-    current_voltage_prop: Union[int, jnp.ndarray]
-    voltage_prop: Union[int, jnp.ndarray]
-    m:          Union[int, jnp.ndarray]
-    h:          Union[int, jnp.ndarray]
-    x:          Union[int, jnp.ndarray]
-    z:          Union[int, jnp.ndarray]
-    lambd_free: Union[int, jnp.ndarray]
-    u:      Union[int, jnp.ndarray]         = jnp.zeros((M, K), dtype=jnp.float32)
-    v:      Union[int, jnp.ndarray]         = jnp.zeros((M, K), dtype=jnp.float32)
-    lambd_old:      Union[int, jnp.ndarray] = jnp.zeros((M, K), dtype=jnp.float32)
-    y:      Union[int, jnp.ndarray]         = jnp.zeros((M, 2, 2), dtype=jnp.float32)
+    current_prop:           jnp.ndarray
+    current_voltage_prop:   jnp.ndarray
+    voltage_prop:           jnp.ndarray
+    m:                      jnp.ndarray
+    h:                      jnp.ndarray
+    x:                      jnp.ndarray
+    z:                      jnp.ndarray
+    lambd_free:             jnp.ndarray
+    u:                      jnp.ndarray
+    v:                      jnp.ndarray
+    lambd_old:              jnp.ndarray
+    y:                      jnp.ndarray
+    index:                  jnp.ndarray
 
 def compute_current_propagators(tau_s, staticparams):
     t1 = jnp.exp(-staticparams.dt / tau_s)
@@ -65,11 +65,6 @@ def compute_current_voltage_propagators(tau_s, tau_m, C_mem, staticparams):
     t1 = (t01 - t00) / (C_mem * denom)
     return jnp.stack((t0, t1))
 
-def compute_voltage_propagators(tau_m, staticparams):
-    t0 = jnp.exp(-staticparams.dt / tau_m)
-    t1 = 1 - t0
-    return jnp.stack((t0, t1), axis=-1)
-
 # vmap over synaptic ports
 compute_current_voltage_propagators \
     = jax.vmap(compute_current_voltage_propagators, in_axes=(0, None, None, None))
@@ -77,6 +72,11 @@ compute_current_voltage_propagators \
 # vmap over populations
 compute_current_voltage_propagators \
     = jax.vmap(compute_current_voltage_propagators, in_axes=(0, 0, 0, None))
+
+def compute_voltage_propagators(tau_m, staticparams):
+    t0 = jnp.exp(-staticparams.dt / tau_m)
+    t1 = 1 - t0
+    return jnp.stack((t0, t1), axis=-1)
 
 def roll_buffers(u, lambd_tilde, v, m):
     u = jnp.roll(u, 1)
@@ -109,21 +109,22 @@ def update_u(current_voltage_prop, voltage_prop, y, u, RI_e):
 
 vupdate_u = jax.vmap(update_u, in_axes=(None, None, None, 0, None))
 
-def update_synapses(current_prop, y):
+def update_synapses(current_prop, y, spikes, w):
     y1 = current_prop[0] * y[0]
     y2 = current_prop[1] * y[0] + current_prop[2] * y[1]
+    y1 = y1 + spikes.dot(w)
     return jnp.stack((y1, y2))
 
 vupdate_synapses = jax.vmap(update_synapses)
 
-def update_state(state: State, params: Params, spikes: jnp.float32, staticparams: StaticParams) -> State:
+def update_state(state: State, params: Params, spikes: jnp.ndarray, staticparams: StaticParams) -> State:
     print('TRACING')
     def P_fn(P_lambd):
         return 1-jnp.exp(-P_lambd)
 
     # upate current
     #y = state.current_prop.dot(state.y)
-    y = vupdate_synapses(state.current_prop, state.y)
+    y = vupdate_synapses(state.current_prop, state.y, spikes, params.w)
 
     X = state.m.sum()
 
@@ -186,7 +187,7 @@ def update_state(state: State, params: Params, spikes: jnp.float32, staticparams
     v = state.v.at[staticparams.num_ref:].set(v)
     m = state.m.at[staticparams.num_ref:].set(m)
 
-    m = m.at[-1].set(spikes)
+    m = m.at[-1].set(spikes[state.index])
 
     lambd_old = state.lambd_old.at[staticparams.num_ref:].set(lambd_tilde)
 
@@ -206,7 +207,8 @@ def update_state(state: State, params: Params, spikes: jnp.float32, staticparams
                   lambd_free = lambd_tilde_free,
                   h = h,
                   x = state.x,
-                  z = state.z
+                  z = state.z,
+                  index = state.index
                   )
     return state, log_prob
 
@@ -218,69 +220,122 @@ def integrate(initial_state, params, spikes):
     carry, log_probs = lax.scan(update_state_wrap, carry, spikes)
     return carry, log_probs
 
+def integrate_state(params, staticparams, spikes, initial_state=None, record=['u', 'h', 'y']):
+    # set up state
+    current_propagators = compute_current_propagators(params.tau_s, staticparams)
+    current_voltage_propagators = compute_current_voltage_propagators(params.tau_s, params.tau_m, params.C_mem, staticparams)
+    voltage_propagators = compute_voltage_propagators(params.tau_m, staticparams)
+    print(voltage_propagators)
+    print(current_voltage_propagators)
+    print(current_propagators)
+    M = params.tau_m.shape[0]
+    K = 1000
+    m_init = np.zeros((M, K), dtype=np.float32)
+    m_init[:,0] = np.ones(M, dtype=np.float32) * params.N
+    m_init = jnp.array(m_init)
+
+    u_init = np.array([np.linspace(0,15,K) for _ in range(M)], dtype=np.float32)
+    state = State(y = jnp.zeros((M, 2, 2), dtype=jnp.float32),
+                  u = jnp.zeros((M, K), dtype=jnp.float32),
+                  v = jnp.zeros((M, K), dtype=jnp.float32),
+                  current_prop = current_propagators,
+                  current_voltage_prop = current_voltage_propagators,
+                  voltage_prop = voltage_propagators,
+                  m = m_init,
+                  lambd_old = jnp.zeros((M, K), dtype=jnp.float32),
+                  h = jnp.zeros((M), dtype=jnp.float32),
+                  x = jnp.zeros((M), dtype=jnp.float32),
+                  z = jnp.zeros((M), dtype=jnp.float32),
+                  lambd_free = jnp.zeros((M), dtype=jnp.float32),
+                  index = jnp.arange(M)
+                  )
+
+    # set up vectorization and jit functions
+    update_state_partial = partial(update_state, staticparams=staticparams)
+    update_state_vec = jax.vmap(update_state_partial)
+    update_state_jit = jax.jit(update_state_vec)
+
+    num_steps = len(spikes)
+    rec = dict()
+    for key in record:
+        rec[key] = np.zeros((num_steps, *getattr(state, key).shape), dtype=np.float32)
+    for i in range(num_steps):
+        print(i, end='\r')
+        state, log_p = update_state_jit(state, params, spikes[i])
+        for key in record:
+            rec[key][i] = state[key].to_py()
+    return rec
+
 def integrate_log_prob(params, initial_state, spikes):
     _, log_probs = integrate(initial_state, params, spikes)
     return log_probs.sum()
 
-grad_log_prob = jax.grad(integrate_log_prob)
-grad_log_prob_jit = jax.jit(grad_log_prob)
-staticparams = StaticParams()
+# steps = 10000
+# M = 1
+# K = 1000
+# staticparams = StaticParams()
+#
+# params = Params(RI = jnp.ones(M, dtype=jnp.float32)*20.,
+#                 tau_m = jnp.ones(M, dtype=jnp.float32)*20.,
+#                 N = jnp.ones(M, dtype=jnp.float32) * 1000,
+#                 tau_s = jnp.ones((M, 2), dtype=jnp.float32),
+#                 u_thr = jnp.zeros(M, dtype=jnp.float32),
+#                 c = jnp.zeros(M, dtype=jnp.float32),
+#                 delta_u = jnp.ones(M, dtype=jnp.float32) * 2,
+#                 C_mem = jnp.zeros(M, dtype=jnp.float32)
+#                 )
+#
+# spikes = np.zeros((steps, M))
+# spikes[80,:] = 50
+#
+# current_propagators = compute_current_propagators(params.tau_s, staticparams)
+# current_voltage_propagators = compute_current_voltage_propagators(params.tau_s, params.tau_m, params.C_mem, staticparams)
+# voltage_propagators = compute_voltage_propagators(params.tau_m, staticparams)
 
-staticaxes = StaticParams(dt=None,
-                          num_steps=None,
-                          num_ref=None)
+# grad_log_prob = jax.grad(integrate_log_prob)
+# grad_log_prob_jit = jax.jit(grad_log_prob)
+#staticparams = StaticParams()
 
-# update_state_vec = jax.vmap(update_state, in_axes=(0, 0, staticaxes, 0))
-update_state_partial = partial(update_state, staticparams=staticparams)
-update_state_vec = jax.vmap(update_state_partial)
-update_state_jit = jax.jit(update_state_vec)
-
-steps = 5000
-
-params = Params(RI = jnp.ones(M)*20.,
-                tau_m = jnp.ones(M)*20.,
-                N = jnp.ones(M) * 1000,
-                tau_s = jnp.ones((M, 2), dtype=jnp.float32))
-
-spikes = np.zeros((steps, M))
-spikes[80,:] = 50
-current_propagators = compute_current_propagators(params.tau_s, staticparams)
-current_voltage_propagators = compute_current_voltage_propagators(params.tau_s, params.tau_m, params.C_mem, staticparams)
-voltage_prop = compute_voltage_propagators(params.tau_m, staticparams)
-
-m_init = np.zeros((M, K), dtype=np.float32)
-m_init[:,0] = np.ones(M, dtype=np.float32) * 1000
-m_init = jnp.array(m_init)
-
-u_init = np.array([np.linspace(0,15,K) for _ in range(M)], dtype=np.float32)
-state = State(y = jnp.zeros((M, 2, 2), dtype=jnp.float32),
-              u = jnp.zeros((M, K), dtype=jnp.float32),
-              v = jnp.zeros((M, K), dtype=jnp.float32),
-              current_prop = current_propagators,
-              current_voltage_prop = current_voltage_propagators,
-              voltage_prop = voltage_prop,
-              m = m_init,
-              lambd_old = jnp.zeros((M, K), dtype=jnp.float32),
-              h = jnp.zeros((M), dtype=jnp.float32),
-              x = jnp.zeros((M), dtype=jnp.float32),
-              z = jnp.zeros((M), dtype=jnp.float32),
-              lambd_free = jnp.zeros((M), dtype=jnp.float32),
-              )
+# staticaxes = StaticParams(dt=None,
+#                           num_steps=None,
+#                           num_ref=None)
+#
+# update_state_partial = partial(update_state, staticparams=staticparams)
+# update_state_vec = jax.vmap(update_state_partial)
+# update_state_jit = jax.jit(update_state_vec)
+#
+# steps = 5000
+#
+# params = Params(RI = jnp.ones(M)*20.,
+#                 tau_m = jnp.ones(M)*20.,
+#                 N = jnp.ones(M) * 1000,
+#                 tau_s = jnp.ones((M, 2), dtype=jnp.float32))
+#
+# spikes = np.zeros((steps, M))
+# spikes[80,:] = 50
+# current_propagators = compute_current_propagators(params.tau_s, staticparams)
+# current_voltage_propagators = compute_current_voltage_propagators(params.tau_s, params.tau_m, params.C_mem, staticparams)
+# voltage_prop = compute_voltage_propagators(params.tau_m, staticparams)
+#
+# m_init = np.zeros((M, K), dtype=np.float32)
+# m_init[:,0] = np.ones(M, dtype=np.float32) * 1000
+# m_init = jnp.array(m_init)
+#
+# u_init = np.array([np.linspace(0,15,K) for _ in range(M)], dtype=np.float32)
+# state = State(y = jnp.zeros((M, 2, 2), dtype=jnp.float32),
+#               u = jnp.zeros((M, K), dtype=jnp.float32),
+#               v = jnp.zeros((M, K), dtype=jnp.float32),
+#               current_prop = current_propagators,
+#               current_voltage_prop = current_voltage_propagators,
+#               voltage_prop = voltage_prop,
+#               m = m_init,
+#               lambd_old = jnp.zeros((M, K), dtype=jnp.float32),
+#               h = jnp.zeros((M), dtype=jnp.float32),
+#               x = jnp.zeros((M), dtype=jnp.float32),
+#               z = jnp.zeros((M), dtype=jnp.float32),
+#               lambd_free = jnp.zeros((M), dtype=jnp.float32),
+#               )
 
 # carry, log_probs = jax.jit(integrate)(state, params, spikes)
 
-states = [state]
-ps = []
-for i in range(steps):
-    print(i, end='\r')
-    s, p = update_state_jit(states[-1], params, spikes[i])
-    ps.append(p.to_py())
-    states.append(s)
-
-ps = np.array(ps)
-us = np.array([s.u.to_py() for s in states])
-
-example_u = np.array([us[i,0,i%K] for i in range(0,2000)])
-h = np.array([s.h[0] for s in states])
-# plt.plot(example_u)
-# plt.show()
+# rec = integrate_state(params, staticparams, spikes)
