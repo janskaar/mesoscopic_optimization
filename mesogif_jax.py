@@ -109,10 +109,10 @@ def update_u(current_voltage_prop, voltage_prop, y, u, RI_e):
 
 vupdate_u = jax.vmap(update_u, in_axes=(None, None, None, 0, None))
 
-def update_synapses(current_prop, y, spikes, w):
+def update_synapses(current_prop, y, spikes, w, tau_s):
     y1 = current_prop[0] * y[0]
     y2 = current_prop[1] * y[0] + current_prop[2] * y[1]
-    y1 = y1 + spikes.dot(w)
+    y1 = y1 + spikes.dot(w) / tau_s
     return jnp.stack((y1, y2))
 
 vupdate_synapses = jax.vmap(update_synapses)
@@ -124,7 +124,7 @@ def update_state(state: State, params: Params, spikes: jnp.ndarray, staticparams
 
     # upate current
     #y = state.current_prop.dot(state.y)
-    y = vupdate_synapses(state.current_prop, state.y, spikes, params.w)
+    y = vupdate_synapses(state.current_prop, state.y, spikes, params.w, params.tau_s)
 
     X = state.m.sum()
 
