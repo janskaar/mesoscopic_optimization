@@ -12,3 +12,5 @@ JAX implementation of the mesoscopic model described in [1], mainly used for inv
 Example of a two-population network:
 ![example_fig_optimized_mesoscopic](https://github.com/janskaar/mesoscopic_optimization/assets/29370469/b6f5969b-ee6e-45a3-b188-7bc9a06d64a9)
 
+
+[1] Schwalger et al. 2017: https://doi.org/10.1371/journal.pcbi.1005507
